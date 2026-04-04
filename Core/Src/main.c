@@ -68,9 +68,11 @@ const osThreadAttr_t LedControlTask_attributes = {.name = "LedControlTask", .sta
 osThreadId_t SensorTaskHandle;
 const osThreadAttr_t SensorTask_attributes = {.name = "SensorTask", .stack_size = 256 * 4, .priority =
     (osPriority_t) osPriorityNormal2, };
+
 /* USER CODE BEGIN PV */
 
 osMessageQueueId_t SensorDataQueue;
+uint8_t periodic_send_enabled = 1;
 
 /* USER CODE END PV */
 
@@ -399,9 +401,12 @@ static void MX_GPIO_Init(void)
 /* Sensor Task - reads and prints sensor data every 2 seconds */
 void StartSensorTask(void *argument)
 {
-  char msg[80];
+  char msg[100];
   TickType_t last_wake_time = xTaskGetTickCount();
-  const TickType_t period = pdMS_TO_TICKS(2000); /* 2 seconds */
+  const TickType_t period = pdMS_TO_TICKS(2000);
+
+  /* External flag to control periodic sending */
+  extern uint8_t periodic_send_enabled;
 
   for(;;)
   {
@@ -409,8 +414,16 @@ void StartSensorTask(void *argument)
     float ppm = MQ2_GetPPM();
     const char *level = MQ2_GetLevelString();
 
-    sprintf(msg, "Sensor: %.2fV | %.0fppm | %s\r\n", voltage, ppm, level);
+    sprintf(msg, "%.2f,%.0f,%s\r\n", voltage, ppm, level); /* CSV format */
+
+    /* Send to UART */
     USART1_SendString(msg);
+
+    /* Send to TCP client only if enabled and connected */
+    if(periodic_send_enabled && getSn_SR(TCP_SERVER_SOCKET) == SOCK_ESTABLISHED)
+    {
+      send(TCP_SERVER_SOCKET, (uint8_t*) msg, strlen(msg));
+    }
 
     vTaskDelayUntil(&last_wake_time, period);
   }
@@ -426,20 +439,18 @@ void StartSensorTask(void *argument)
 /* USER CODE END Header_StartTcpReceiveTask */
 void StartTcpReceiveTask(void *argument)
 {
-  /* USER CODE BEGIN 5 */
-
   uint16_t available_data = 0;
   uint8_t buffer[256];
-#define BUFFER_SIZE 256
+  char response[150];
+  extern uint8_t periodic_send_enabled;
+  #define BUFFER_SIZE 256
 
-  /* Infinite loop */
   for(;;)
   {
     uint8_t status = getSn_SR(TCP_SERVER_SOCKET);
     switch(status)
     {
       case SOCK_ESTABLISHED:
-        // Check for data
         available_data = getSn_RX_RSR(TCP_SERVER_SOCKET);
 
         if(available_data > 0)
@@ -449,11 +460,8 @@ void StartTcpReceiveTask(void *argument)
           if(ret > 0)
           {
             buffer[ret] = '\0';
-            USART1_SendString("Received: ");
-            USART1_SendString((char*) buffer);
-            USART1_SendString("\r\n");
 
-            // Remove newline characters for comparison
+            // Remove newline characters
             for(int i = 0; i < ret; i++)
             {
               if(buffer[i] == '\n' || buffer[i] == '\r')
@@ -463,26 +471,67 @@ void StartTcpReceiveTask(void *argument)
               }
             }
 
-            // Parse command and control LED
+            // LED Control
             if(strncmp((char*) buffer, "ON", 2) == 0 || strncmp((char*) buffer, "on", 2) == 0)
             {
-              osThreadFlagsSet(LedControlTaskHandle, 0x01); // Flag to turn LED ON
+              osThreadFlagsSet(LedControlTaskHandle, 0x01);
+              send(TCP_SERVER_SOCKET, (uint8_t*) "LED ON\r\n", 8);
             }
             else if(strncmp((char*) buffer, "OFF", 3) == 0 || strncmp((char*) buffer, "off", 3) == 0)
             {
-              osThreadFlagsSet(LedControlTaskHandle, 0x02); // Flag to turn LED OFF
+              osThreadFlagsSet(LedControlTaskHandle, 0x02);
+              send(TCP_SERVER_SOCKET, (uint8_t*) "LED OFF\r\n", 9);
+            }
+            // Periodic control
+            else if(strncmp((char*) buffer, "START", 5) == 0)
+            {
+              periodic_send_enabled = 1;
+              send(TCP_SERVER_SOCKET, (uint8_t*) "Auto-send STARTED (every 2 sec)\r\n", 33);
+            }
+            else if(strncmp((char*) buffer, "STOP", 4) == 0)
+            {
+              periodic_send_enabled = 0;
+              send(TCP_SERVER_SOCKET, (uint8_t*) "Auto-send STOPPED\r\n", 20);
+            }
+            // Get single reading
+            else if(strncmp((char*) buffer, "GAS", 3) == 0)
+            {
+              float voltage = MQ2_GetVoltage();
+              float ppm = MQ2_GetPPM();
+              const char *level = MQ2_GetLevelString();
+
+              sprintf(response, "Gas: %.2fV | %.0fppm | %s\r\n", voltage, ppm, level);
+              send(TCP_SERVER_SOCKET, (uint8_t*) response, strlen(response));
+            }
+            // Status
+            else if(strncmp((char*) buffer, "STATUS", 6) == 0)
+            {
+              sprintf(response, "Auto-send: %s\r\n", periodic_send_enabled ? "ON" : "OFF");
+              send(TCP_SERVER_SOCKET, (uint8_t*) response, strlen(response));
+            }
+            // Help
+            else if(strncmp((char*) buffer, "HELP", 4) == 0)
+            {
+              const char *help = "Commands:\r\n"
+                  "  ON/OFF  - Control LED\r\n"
+                  "  GAS     - Get one reading\r\n"
+                  "  START   - Start periodic sending (2 sec)\r\n"
+                  "  STOP    - Stop periodic sending\r\n"
+                  "  STATUS  - Show current status\r\n"
+                  "  HELP    - Show this help\r\n";
+              send(TCP_SERVER_SOCKET, (uint8_t*) help, strlen(help));
             }
           }
         }
         break;
 
       case SOCK_CLOSE_WAIT:
-        USART1_SendString("\r\nClient disconnected\r\n");
+        USART1_SendString("Client disconnected\r\n");
         disconnect(TCP_SERVER_SOCKET);
         break;
 
       case SOCK_CLOSED:
-        USART1_SendString("Waiting for new client...\r\n");
+        USART1_SendString("Waiting for client...\r\n");
         if(socket(TCP_SERVER_SOCKET, Sn_MR_TCP, TCP_SERVER_PORT, 0) == TCP_SERVER_SOCKET)
         {
           listen(TCP_SERVER_SOCKET);
@@ -493,10 +542,10 @@ void StartTcpReceiveTask(void *argument)
         break;
     }
 
-    osDelay(1);
+    osDelay(10);
   }
-  /* USER CODE END 5 */
 }
+/* USER CODE END 5 */
 
 /* USER CODE BEGIN Header_StartLedControlTask */
 /**
