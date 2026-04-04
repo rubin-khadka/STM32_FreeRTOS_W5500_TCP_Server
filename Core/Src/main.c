@@ -58,11 +58,19 @@ SPI_HandleTypeDef hspi1;
 osThreadId_t TcpReceiveTaskHandle;
 const osThreadAttr_t TcpReceiveTask_attributes = {.name = "TcpReceiveTask", .stack_size = 512 * 4, .priority =
     (osPriority_t) osPriorityNormal, };
+
 /* Definitions for LedControlTask */
 osThreadId_t LedControlTaskHandle;
-const osThreadAttr_t LedControlTask_attributes = {.name = "LedControlTask", .stack_size = 512 * 4, .priority =
+const osThreadAttr_t LedControlTask_attributes = {.name = "LedControlTask", .stack_size = 256 * 4, .priority =
     (osPriority_t) osPriorityNormal1, };
+
+/* Definitions for SensorTask */
+osThreadId_t SensorTaskHandle;
+const osThreadAttr_t SensorTask_attributes = {.name = "SensorTask", .stack_size = 256 * 4, .priority =
+    (osPriority_t) osPriorityNormal2, };
 /* USER CODE BEGIN PV */
+
+osMessageQueueId_t SensorDataQueue;
 
 /* USER CODE END PV */
 
@@ -73,6 +81,7 @@ static void MX_SPI1_Init(void);
 static void MX_ADC1_Init(void);
 void StartTcpReceiveTask(void *argument);
 void StartLedControlTask(void *argument);
+void StartSensorTask(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -188,7 +197,7 @@ int main(void)
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
+  SensorDataQueue = osMessageQueueNew(5, sizeof(float), NULL);
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -197,6 +206,8 @@ int main(void)
 
   /* creation of LedControlTask */
   LedControlTaskHandle = osThreadNew(StartLedControlTask, NULL, &LedControlTask_attributes);
+
+  SensorTaskHandle = osThreadNew(StartSensorTask, NULL, &SensorTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -385,6 +396,25 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+/* Sensor Task - reads and prints sensor data every 2 seconds */
+void StartSensorTask(void *argument)
+{
+  char msg[80];
+  TickType_t last_wake_time = xTaskGetTickCount();
+  const TickType_t period = pdMS_TO_TICKS(2000); /* 2 seconds */
+
+  for(;;)
+  {
+    float voltage = MQ2_GetVoltage();
+    float ppm = MQ2_GetPPM();
+    const char *level = MQ2_GetLevelString();
+
+    sprintf(msg, "Sensor: %.2fV | %.0fppm | %s\r\n", voltage, ppm, level);
+    USART1_SendString(msg);
+
+    vTaskDelayUntil(&last_wake_time, period);
+  }
+}
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartTcpReceiveTask */
