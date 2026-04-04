@@ -1,20 +1,20 @@
 /* USER CODE BEGIN Header */
 /**
-  ******************************************************************************
-  * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+ ******************************************************************************
+ * @file           : main.c
+ * @brief          : Main program body
+ ******************************************************************************
+ * @attention
+ *
+ * Copyright (c) 2026 STMicroelectronics.
+ * All rights reserved.
+ *
+ * This software is licensed under terms that can be found in the LICENSE file
+ * in the root directory of this software component.
+ * If no LICENSE file comes with this software, it is provided AS-IS.
+ *
+ ******************************************************************************
+ */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
@@ -22,12 +22,18 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "wizchip_port.h"
+#include "usart1.h"
+#include "socket.h"
+#include "wizchip_conf.h"
+#include "gpio.h"
+#include "string.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+#define TCP_SERVER_SOCKET   0
+#define TCP_SERVER_PORT     5000
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -108,6 +114,34 @@ int main(void)
   MX_GPIO_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
+  USART1_Init();
+
+  USART1_SendString("UART Initialised ");
+  if(W5500_Init() != 0)
+  {
+    Error_Handler();
+  }
+
+  // Create socket
+  if(socket(TCP_SERVER_SOCKET, Sn_MR_TCP, TCP_SERVER_PORT, 0) != TCP_SERVER_SOCKET)
+  {
+    USART1_SendString("Socket open failed\r\n");
+  }
+
+  // Start listening
+  if(listen(TCP_SERVER_SOCKET) != SOCK_OK)
+  {
+    USART1_SendString("Listen failed\r\n");
+    close(TCP_SERVER_SOCKET);
+  }
+
+  USART1_SendString("TCP Server with LED Control on port ");
+  USART1_SendNumber(TCP_SERVER_PORT);
+  USART1_SendString("\r\n");
+
+  // Initialize LED
+  LED_init();
+  LED_OFF();  // Start with LED off
 
   /* USER CODE END 2 */
 
@@ -152,7 +186,7 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while (1)
+  while(1)
   {
     /* USER CODE END WHILE */
 
@@ -253,17 +287,16 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, CS_Pin|RESET_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOA, RESET_Pin|CS_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : CS_Pin RESET_Pin */
-  GPIO_InitStruct.Pin = CS_Pin|RESET_Pin;
+  /*Configure GPIO pins : RESET_Pin CS_Pin */
+  GPIO_InitStruct.Pin = RESET_Pin|CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -276,17 +309,80 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN Header_StartTcpReceiveTask */
 /**
-  * @brief  Function implementing the TcpReceiveTask thread.
-  * @param  argument: Not used
-  * @retval None
-  */
+ * @brief  Function implementing the TcpReceiveTask thread.
+ * @param  argument: Not used
+ * @retval None
+ */
 /* USER CODE END Header_StartTcpReceiveTask */
 void StartTcpReceiveTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
+
+  uint16_t available_data = 0;
+  uint8_t buffer[256];
+  #define BUFFER_SIZE 256
+
   /* Infinite loop */
   for(;;)
   {
+    uint8_t status = getSn_SR(TCP_SERVER_SOCKET);
+    switch(status)
+    {
+      case SOCK_ESTABLISHED:
+        // Check for data
+        available_data = getSn_RX_RSR(TCP_SERVER_SOCKET);
+
+        if(available_data > 0)
+        {
+          int32_t ret = recv(TCP_SERVER_SOCKET, buffer, (available_data < BUFFER_SIZE) ? available_data : BUFFER_SIZE);
+
+          if(ret > 0)
+          {
+            buffer[ret] = '\0';
+            USART1_SendString("Received: ");
+            USART1_SendString((char*) buffer);
+            USART1_SendString("\r\n");
+
+            // Remove newline characters for comparison
+            for(int i = 0; i < ret; i++)
+            {
+              if(buffer[i] == '\n' || buffer[i] == '\r')
+              {
+                buffer[i] = '\0';
+                break;
+              }
+            }
+
+            // Parse command and control LED
+            if(strncmp((char*) buffer, "ON", 2) == 0 || strncmp((char*) buffer, "on", 2) == 0)
+            {
+              osThreadFlagsSet(LedControlTaskHandle, 0x01); // Flag to turn LED ON
+            }
+            else if(strncmp((char*) buffer, "OFF", 3) == 0 || strncmp((char*) buffer, "off", 3) == 0)
+            {
+              osThreadFlagsSet(LedControlTaskHandle, 0x02); // Flag to turn LED OFF
+            }
+          }
+        }
+        break;
+
+      case SOCK_CLOSE_WAIT:
+        USART1_SendString("\r\nClient disconnected\r\n");
+        disconnect(TCP_SERVER_SOCKET);
+        break;
+
+      case SOCK_CLOSED:
+        USART1_SendString("Waiting for new client...\r\n");
+        if(socket(TCP_SERVER_SOCKET, Sn_MR_TCP, TCP_SERVER_PORT, 0) == TCP_SERVER_SOCKET)
+        {
+          listen(TCP_SERVER_SOCKET);
+        }
+        break;
+
+      default:
+        break;
+    }
+
     osDelay(1);
   }
   /* USER CODE END 5 */
@@ -294,17 +390,32 @@ void StartTcpReceiveTask(void *argument)
 
 /* USER CODE BEGIN Header_StartLedControlTask */
 /**
-* @brief Function implementing the LedControlTask thread.
-* @param argument: Not used
-* @retval None
-*/
+ * @brief Function implementing the LedControlTask thread.
+ * @param argument: Not used
+ * @retval None
+ */
 /* USER CODE END Header_StartLedControlTask */
 void StartLedControlTask(void *argument)
 {
   /* USER CODE BEGIN StartLedControlTask */
   /* Infinite loop */
+
+  uint8_t buffer[256];
   for(;;)
   {
+    uint32_t flag = osThreadFlagsWait(0x01 | 0x02, osFlagsWaitAny, osWaitForever);
+    if(flag == 0x01) // Turn LED ON
+    {
+      LED_ON();
+      strcpy((char*) buffer, "LED Turned ON\r\n");
+      send(TCP_SERVER_SOCKET, buffer, strlen((char*) buffer));
+    }
+    else if(flag == 0x02) // Turn LED OFF
+    {
+      LED_OFF();
+      strcpy((char*) buffer, "LED Turned OFF\r\n");
+      send(TCP_SERVER_SOCKET, buffer, strlen((char*) buffer));
+    }
     osDelay(1);
   }
   /* USER CODE END StartLedControlTask */
@@ -312,7 +423,7 @@ void StartLedControlTask(void *argument)
 
 /**
   * @brief  Period elapsed callback in non blocking mode
-  * @note   This function is called  when TIM1 interrupt took place, inside
+  * @note   This function is called  when TIM2 interrupt took place, inside
   * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
   * a global variable "uwTick" used as application time base.
   * @param  htim : TIM handle
@@ -323,7 +434,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   /* USER CODE BEGIN Callback 0 */
 
   /* USER CODE END Callback 0 */
-  if (htim->Instance == TIM1)
+  if (htim->Instance == TIM2)
   {
     HAL_IncTick();
   }
@@ -341,7 +452,7 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
-  while (1)
+  while(1)
   {
   }
   /* USER CODE END Error_Handler_Debug */
