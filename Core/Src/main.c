@@ -119,82 +119,30 @@ int main(void)
   /* USER CODE BEGIN 2 */
   USART1_Init();
 
+  /* Initialize MQ-2 Sensor */
   if(MQ2_Init(&hadc1) != HAL_OK)
   {
     USART1_SendString("MQ-2 Init FAILED!\r\n");
     Error_Handler();
   }
-
   USART1_SendString("MQ-2 Sensor Initialized\r\n");
-  USART1_SendString("Testing ADC...\r\n");
-  for(int i = 0; i < 3; i++)
-  {
-    uint32_t raw = MQ2_ReadRawADC();
-    float voltage = (raw * 3.3f) / 4095.0f;
-    char msg[60];
-    sprintf(msg, "ADC: %lu = %.2fV\r\n", raw, voltage);
-    USART1_SendString(msg);
-    HAL_Delay(500);
-  }
 
-  /* Step 2: Warm up */
-  USART1_SendString("\r\nWarming up MQ-2 (30 sec)...\r\n");
-  for(int i = 30; i > 0; i--)
+  /* Quick sensor test (5 readings) */
+  USART1_SendString("\r\n=== MQ-2 Sensor Test ===\r\n");
+  for(int i = 0; i < 5; i++)
   {
-    char count_msg[20];
-    sprintf(count_msg, "%d seconds left\r\n", i);
-    USART1_SendString(count_msg);
-    HAL_Delay(1000);
-  }
-
-  /* Step 3: Calibrate */
-  USART1_SendString("\r\nCalibrating...\r\n");
-  if(MQ2_Calibrate(50))
-  {
-    USART1_SendString("Calibration SUCCESSFUL!\r\n");
-
-    /* Show calibration results */
     float voltage = MQ2_GetVoltage();
     float ppm = MQ2_GetPPM();
     const char *level = MQ2_GetLevelString();
 
-    char result_msg[300];
-    sprintf(result_msg, "\r\n=== Calibration Results ===\r\n"
-        "Voltage: %.2f V\r\n"
-        "PPM: %.0f\r\n"
-        "Level: %s\r\n"
-        "\r\nExpected (clean air):\r\n"
-        "Voltage: 0.1-0.3V | PPM: <100 | Level: NORMAL\r\n"
-        "\r\nNow test with gas (lighter without flame)!\r\n"
-        "You should see voltage and PPM increase.\r\n", voltage, ppm, level);
-    USART1_SendString(result_msg);
-
-    /* Step 4: Continuous monitoring for 30 seconds */
-    USART1_SendString("\r\n=== Monitoring for 30 seconds ===\r\n");
-    for(int i = 0; i < 15; i++)
-    {
-      float v = MQ2_GetVoltage();
-      float p = MQ2_GetPPM();
-      const char *lvl = MQ2_GetLevelString();
-
-      char monitor_msg[80];
-      sprintf(monitor_msg, "[%d] %.2fV | %.0fppm | %s\r\n", i + 1, v, p, lvl);
-      USART1_SendString(monitor_msg);
-
-      HAL_Delay(2000);
-    }
-  }
-  else
-  {
-    USART1_SendString("Calibration FAILED!\r\n");
-    USART1_SendString("Check:\r\n");
-    USART1_SendString("- Voltage divider (10k+20k)\r\n");
-    USART1_SendString("- PA0 connected correctly\r\n");
-    USART1_SendString("- Sensor warmed up\r\n");
+    char msg[80];
+    sprintf(msg, "[%d] %.2fV | %.0fppm | %s\r\n", i + 1, voltage, ppm, level);
+    USART1_SendString(msg);
+    HAL_Delay(1000);
   }
 
+  /* Initialize W5500 */
   USART1_SendString("\r\n=== Starting TCP Server ===\r\n");
-
   if(W5500_Init() != 0)
   {
     Error_Handler();
@@ -213,13 +161,14 @@ int main(void)
     close(TCP_SERVER_SOCKET);
   }
 
-  USART1_SendString("TCP Server with LED Control on port ");
+  USART1_SendString("TCP Server on port ");
   USART1_SendNumber(TCP_SERVER_PORT);
   USART1_SendString("\r\n");
+  USART1_SendString("Commands: ON, OFF, GAS\r\n");
 
-  // Initialize LED
+  /* Initialize LED */
   LED_init();
-  LED_OFF();  // Start with LED off
+  LED_OFF();
 
   /* USER CODE END 2 */
 
