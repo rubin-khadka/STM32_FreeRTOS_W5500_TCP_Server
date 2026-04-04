@@ -28,6 +28,9 @@
 #include "wizchip_conf.h"
 #include "gpio.h"
 #include "string.h"
+#include "mq2_sensor.h"
+#include <stdio.h>
+#include "string.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -47,22 +50,18 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc1;
+
 SPI_HandleTypeDef hspi1;
 
 /* Definitions for TcpReceiveTask */
 osThreadId_t TcpReceiveTaskHandle;
-const osThreadAttr_t TcpReceiveTask_attributes = {
-  .name = "TcpReceiveTask",
-  .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
-};
+const osThreadAttr_t TcpReceiveTask_attributes = {.name = "TcpReceiveTask", .stack_size = 512 * 4, .priority =
+    (osPriority_t) osPriorityNormal, };
 /* Definitions for LedControlTask */
 osThreadId_t LedControlTaskHandle;
-const osThreadAttr_t LedControlTask_attributes = {
-  .name = "LedControlTask",
-  .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityNormal1,
-};
+const osThreadAttr_t LedControlTask_attributes = {.name = "LedControlTask", .stack_size = 512 * 4, .priority =
+    (osPriority_t) osPriorityNormal1, };
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -71,6 +70,7 @@ const osThreadAttr_t LedControlTask_attributes = {
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_ADC1_Init(void);
 void StartTcpReceiveTask(void *argument);
 void StartLedControlTask(void *argument);
 
@@ -84,9 +84,9 @@ void StartLedControlTask(void *argument);
 /* USER CODE END 0 */
 
 /**
-  * @brief  The application entry point.
-  * @retval int
-  */
+ * @brief  The application entry point.
+ * @retval int
+ */
 int main(void)
 {
 
@@ -113,10 +113,88 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_SPI1_Init();
+  MX_ADC1_Init();
+  /* USER CODE BEGIN 2 */
+
   /* USER CODE BEGIN 2 */
   USART1_Init();
 
-  USART1_SendString("UART Initialised ");
+  if(MQ2_Init(&hadc1) != HAL_OK)
+  {
+    USART1_SendString("MQ-2 Init FAILED!\r\n");
+    Error_Handler();
+  }
+
+  USART1_SendString("MQ-2 Sensor Initialized\r\n");
+  USART1_SendString("Testing ADC...\r\n");
+  for(int i = 0; i < 3; i++)
+  {
+    uint32_t raw = MQ2_ReadRawADC();
+    float voltage = (raw * 3.3f) / 4095.0f;
+    char msg[60];
+    sprintf(msg, "ADC: %lu = %.2fV\r\n", raw, voltage);
+    USART1_SendString(msg);
+    HAL_Delay(500);
+  }
+
+  /* Step 2: Warm up */
+  USART1_SendString("\r\nWarming up MQ-2 (30 sec)...\r\n");
+  for(int i = 30; i > 0; i--)
+  {
+    char count_msg[20];
+    sprintf(count_msg, "%d seconds left\r\n", i);
+    USART1_SendString(count_msg);
+    HAL_Delay(1000);
+  }
+
+  /* Step 3: Calibrate */
+  USART1_SendString("\r\nCalibrating...\r\n");
+  if(MQ2_Calibrate(50))
+  {
+    USART1_SendString("Calibration SUCCESSFUL!\r\n");
+
+    /* Show calibration results */
+    float voltage = MQ2_GetVoltage();
+    float ppm = MQ2_GetPPM();
+    const char *level = MQ2_GetLevelString();
+
+    char result_msg[300];
+    sprintf(result_msg, "\r\n=== Calibration Results ===\r\n"
+        "Voltage: %.2f V\r\n"
+        "PPM: %.0f\r\n"
+        "Level: %s\r\n"
+        "\r\nExpected (clean air):\r\n"
+        "Voltage: 0.1-0.3V | PPM: <100 | Level: NORMAL\r\n"
+        "\r\nNow test with gas (lighter without flame)!\r\n"
+        "You should see voltage and PPM increase.\r\n", voltage, ppm, level);
+    USART1_SendString(result_msg);
+
+    /* Step 4: Continuous monitoring for 30 seconds */
+    USART1_SendString("\r\n=== Monitoring for 30 seconds ===\r\n");
+    for(int i = 0; i < 15; i++)
+    {
+      float v = MQ2_GetVoltage();
+      float p = MQ2_GetPPM();
+      const char *lvl = MQ2_GetLevelString();
+
+      char monitor_msg[80];
+      sprintf(monitor_msg, "[%d] %.2fV | %.0fppm | %s\r\n", i + 1, v, p, lvl);
+      USART1_SendString(monitor_msg);
+
+      HAL_Delay(2000);
+    }
+  }
+  else
+  {
+    USART1_SendString("Calibration FAILED!\r\n");
+    USART1_SendString("Check:\r\n");
+    USART1_SendString("- Voltage divider (10k+20k)\r\n");
+    USART1_SendString("- PA0 connected correctly\r\n");
+    USART1_SendString("- Sensor warmed up\r\n");
+  }
+
+  USART1_SendString("\r\n=== Starting TCP Server ===\r\n");
+
   if(W5500_Init() != 0)
   {
     Error_Handler();
@@ -196,17 +274,18 @@ int main(void)
 }
 
 /**
-  * @brief System Clock Configuration
-  * @retval None
-  */
+ * @brief System Clock Configuration
+ * @retval None
+ */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
 
   /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
+   * in the RCC_OscInitTypeDef structure.
+   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
@@ -214,31 +293,83 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  if(HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+   */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  if(HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC;
+  PeriphClkInit.AdcClockSelection = RCC_ADCPCLK2_DIV6;
+  if(HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
     Error_Handler();
   }
 }
 
 /**
-  * @brief SPI1 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief ADC1 Initialization Function
+ * @param None
+ * @retval None
+ */
+static void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Common config
+   */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.NbrOfConversion = 1;
+  if(HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+   */
+  sConfig.Channel = ADC_CHANNEL_0;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;
+  if(HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
+}
+
+/**
+ * @brief SPI1 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_SPI1_Init(void)
 {
 
@@ -262,7 +393,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
   hspi1.Init.CRCPolynomial = 10;
-  if (HAL_SPI_Init(&hspi1) != HAL_OK)
+  if(HAL_SPI_Init(&hspi1) != HAL_OK)
   {
     Error_Handler();
   }
@@ -273,10 +404,10 @@ static void MX_SPI1_Init(void)
 }
 
 /**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief GPIO Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -289,10 +420,10 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, RESET_Pin|CS_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, RESET_Pin | CS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : RESET_Pin CS_Pin */
-  GPIO_InitStruct.Pin = RESET_Pin|CS_Pin;
+  GPIO_InitStruct.Pin = RESET_Pin | CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -320,7 +451,7 @@ void StartTcpReceiveTask(void *argument)
 
   uint16_t available_data = 0;
   uint8_t buffer[256];
-  #define BUFFER_SIZE 256
+#define BUFFER_SIZE 256
 
   /* Infinite loop */
   for(;;)
@@ -422,19 +553,19 @@ void StartLedControlTask(void *argument)
 }
 
 /**
-  * @brief  Period elapsed callback in non blocking mode
-  * @note   This function is called  when TIM2 interrupt took place, inside
-  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
-  * a global variable "uwTick" used as application time base.
-  * @param  htim : TIM handle
-  * @retval None
-  */
+ * @brief  Period elapsed callback in non blocking mode
+ * @note   This function is called  when TIM2 interrupt took place, inside
+ * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+ * a global variable "uwTick" used as application time base.
+ * @param  htim : TIM handle
+ * @retval None
+ */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   /* USER CODE BEGIN Callback 0 */
 
   /* USER CODE END Callback 0 */
-  if (htim->Instance == TIM2)
+  if(htim->Instance == TIM2)
   {
     HAL_IncTick();
   }
@@ -444,9 +575,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 }
 
 /**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
+ * @brief  This function is executed in case of error occurrence.
+ * @retval None
+ */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
