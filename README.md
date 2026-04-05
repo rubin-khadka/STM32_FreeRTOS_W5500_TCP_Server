@@ -7,6 +7,10 @@
 
 https://github.com/user-attachments/assets/2e1807cc-5cb7-4580-93d2-7d81173928da
 
+### TCP client control
+
+https://github.com/user-attachments/assets/97861650-09b9-4ed4-864d-9dad6cf6cea2
+
 ### Static IP Configuration in windows
 
 <img width="610" height="931" alt="static_ip_config" src="https://github.com/user-attachments/assets/a6d57274-0687-4945-a00d-b688afe37c9c" />
