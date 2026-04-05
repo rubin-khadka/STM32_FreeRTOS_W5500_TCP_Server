@@ -37,6 +37,7 @@
 /* USER CODE BEGIN PTD */
 #define TCP_SERVER_SOCKET   0
 #define TCP_SERVER_PORT     5000
+#define BUFFER_SIZE 256
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -73,6 +74,7 @@ const osThreadAttr_t SensorTask_attributes = {.name = "SensorTask", .stack_size 
 
 osMessageQueueId_t SensorDataQueue;
 uint8_t periodic_send_enabled = 1;
+uint8_t led_current_state = 0;  // 0 = OFF, 1 = ON
 
 /* USER CODE END PV */
 
@@ -133,24 +135,10 @@ int main(void)
   /* Initialize MQ-2 Sensor */
   if(MQ2_Init(&hadc1) != HAL_OK)
   {
-    USART1_SendString("MQ-2 Init FAILED!\r\n");
+    USART1_SendString("\r\nMQ-2 Init FAILED!\r\n");
     Error_Handler();
   }
-  USART1_SendString("MQ-2 Sensor Initialized\r\n");
-
-  /* Quick sensor test (5 readings) */
-  USART1_SendString("\r\n=== MQ-2 Sensor Test ===\r\n");
-  for(int i = 0; i < 5; i++)
-  {
-    float voltage = MQ2_GetVoltage();
-    float ppm = MQ2_GetPPM();
-    const char *level = MQ2_GetLevelString();
-
-    char msg[80];
-    sprintf(msg, "[%d] %.2fV | %.0fppm | %s\r\n", i + 1, voltage, ppm, level);
-    USART1_SendString(msg);
-    HAL_Delay(1000);
-  }
+  USART1_SendString("\r\nMQ-2 Sensor Initialized\r\n");
 
   /* Initialize W5500 */
   USART1_SendString("\r\n=== Starting TCP Server ===\r\n");
@@ -175,7 +163,7 @@ int main(void)
   USART1_SendString("TCP Server on port ");
   USART1_SendNumber(TCP_SERVER_PORT);
   USART1_SendString("\r\n");
-  USART1_SendString("Commands: ON, OFF, GAS\r\n");
+  USART1_SendString("Commands: ON, OFF, TOGGLE, STATUS, GAS, START, STOP, STATUS, HELP\r\n");
 
   /* Initialize LED */
   LED_init();
@@ -416,9 +404,6 @@ void StartSensorTask(void *argument)
 
     sprintf(msg, "%.2f,%.0f,%s\r\n", voltage, ppm, level); /* CSV format */
 
-    /* Send to UART */
-    USART1_SendString(msg);
-
     /* Send to TCP client only if enabled and connected */
     if(periodic_send_enabled && getSn_SR(TCP_SERVER_SOCKET) == SOCK_ESTABLISHED)
     {
@@ -443,7 +428,7 @@ void StartTcpReceiveTask(void *argument)
   uint8_t buffer[256];
   char response[150];
   extern uint8_t periodic_send_enabled;
-  #define BUFFER_SIZE 256
+  extern uint8_t led_current_state;
 
   for(;;)
   {
@@ -482,19 +467,31 @@ void StartTcpReceiveTask(void *argument)
               osThreadFlagsSet(LedControlTaskHandle, 0x02);
               send(TCP_SERVER_SOCKET, (uint8_t*) "LED OFF\r\n", 9);
             }
+            // TOGGLE COMMAND
+            else if(strncmp((char*) buffer, "TOGGLE", 6) == 0 || strncmp((char*) buffer, "toggle", 6) == 0)
+            {
+              osThreadFlagsSet(LedControlTaskHandle, 0x03);
+              send(TCP_SERVER_SOCKET, (uint8_t*) "LED TOGGLED\r\n", 14);
+            }
+            // LED STATUS COMMAND
+            else if(strncmp((char*) buffer, "STATUS", 6) == 0 || strncmp((char*) buffer, "status", 6) == 0)
+            {
+              sprintf(response, "LED is %s\r\n", led_current_state ? "ON" : "OFF");
+              send(TCP_SERVER_SOCKET, (uint8_t*) response, strlen(response));
+            }
             // Periodic control
-            else if(strncmp((char*) buffer, "START", 5) == 0)
+            else if(strncmp((char*) buffer, "START", 5) == 0 || strncmp((char*) buffer, "start", 5) == 0)
             {
               periodic_send_enabled = 1;
               send(TCP_SERVER_SOCKET, (uint8_t*) "Auto-send STARTED (every 2 sec)\r\n", 33);
             }
-            else if(strncmp((char*) buffer, "STOP", 4) == 0)
+            else if(strncmp((char*) buffer, "STOP", 4) == 0 || strncmp((char*) buffer, "stop", 4) == 0)
             {
               periodic_send_enabled = 0;
               send(TCP_SERVER_SOCKET, (uint8_t*) "Auto-send STOPPED\r\n", 20);
             }
             // Get single reading
-            else if(strncmp((char*) buffer, "GAS", 3) == 0)
+            else if(strncmp((char*) buffer, "GAS", 3) == 0 || strncmp((char*) buffer, "gas", 3) == 0)
             {
               float voltage = MQ2_GetVoltage();
               float ppm = MQ2_GetPPM();
@@ -503,24 +500,19 @@ void StartTcpReceiveTask(void *argument)
               sprintf(response, "Gas: %.2fV | %.0fppm | %s\r\n", voltage, ppm, level);
               send(TCP_SERVER_SOCKET, (uint8_t*) response, strlen(response));
             }
-            // Status
-            else if(strncmp((char*) buffer, "STATUS", 6) == 0)
-            {
-              sprintf(response, "Auto-send: %s\r\n", periodic_send_enabled ? "ON" : "OFF");
-              send(TCP_SERVER_SOCKET, (uint8_t*) response, strlen(response));
-            }
             // Help
-            else if(strncmp((char*) buffer, "HELP", 4) == 0)
+            else if(strncmp((char*) buffer, "HELP", 4) == 0 || strncmp((char*) buffer, "help", 4) == 0)
             {
               const char *help = "Commands:\r\n"
-                  "  ON/OFF  - Control LED\r\n"
-                  "  GAS     - Get one reading\r\n"
-                  "  START   - Start periodic sending (2 sec)\r\n"
-                  "  STOP    - Stop periodic sending\r\n"
-                  "  STATUS  - Show current status\r\n"
-                  "  HELP    - Show this help\r\n";
+                  "  ON/OFF/TOGGLE - Control LED\r\n"
+                  "  STATUS        - Show LED state\r\n"
+                  "  GAS           - Get one gas reading\r\n"
+                  "  START         - Start periodic sending (2 sec)\r\n"
+                  "  STOP          - Stop periodic sending\r\n"
+                  "  HELP          - Show this help\r\n";
               send(TCP_SERVER_SOCKET, (uint8_t*) help, strlen(help));
             }
+
           }
         }
         break;
@@ -556,28 +548,45 @@ void StartTcpReceiveTask(void *argument)
 /* USER CODE END Header_StartLedControlTask */
 void StartLedControlTask(void *argument)
 {
-  /* USER CODE BEGIN StartLedControlTask */
-  /* Infinite loop */
-
   uint8_t buffer[256];
+  extern uint8_t led_current_state;
+
   for(;;)
   {
-    uint32_t flag = osThreadFlagsWait(0x01 | 0x02, osFlagsWaitAny, osWaitForever);
+    uint32_t flag = osThreadFlagsWait(0x01 | 0x02 | 0x03, osFlagsWaitAny, osWaitForever);
+
     if(flag == 0x01) // Turn LED ON
     {
       LED_ON();
+      led_current_state = 1;  // Update global
       strcpy((char*) buffer, "LED Turned ON\r\n");
       send(TCP_SERVER_SOCKET, buffer, strlen((char*) buffer));
     }
     else if(flag == 0x02) // Turn LED OFF
     {
       LED_OFF();
+      led_current_state = 0;  // Update global
       strcpy((char*) buffer, "LED Turned OFF\r\n");
+      send(TCP_SERVER_SOCKET, buffer, strlen((char*) buffer));
+    }
+    else if(flag == 0x03) // TOGGLE LED
+    {
+      if(led_current_state)
+      {
+        LED_OFF();
+        led_current_state = 0;
+        strcpy((char*) buffer, "LED Turned OFF\r\n");
+      }
+      else
+      {
+        LED_ON();
+        led_current_state = 1;
+        strcpy((char*) buffer, "LED Turned ON\r\n");
+      }
       send(TCP_SERVER_SOCKET, buffer, strlen((char*) buffer));
     }
     osDelay(1);
   }
-  /* USER CODE END StartLedControlTask */
 }
 
 /**
