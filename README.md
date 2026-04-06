@@ -18,6 +18,18 @@ This architecture allows non-blocking, simultaneous operations: you can control 
 - Inter-task communication using thread flags and message queues
 - Real-time command response without blocking
 
+### Memory Usage Note
+
+FreeRTOS provides true multitasking with precise timing, but adds overhead:
+
+| Version | Flash | RAM | Free Flash (64KB) |
+|---------|-------|-----|-------------------|
+| Non-RTOS | 31 KB | 3.6 KB | 33 KB |
+| **FreeRTOS** | 53 KB | **11.5 KB** | **11 KB** |
+
+**Overhead:** +22 KB Flash, +8 KB RAM. Fine for 64KB+ devices, but be mindful on tight budgets.
+
+
 ## Project Functionality
 ### Hardware Configuration
 
